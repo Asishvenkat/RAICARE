@@ -1,0 +1,27 @@
+# Ignore Python cache and environment
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+
+# Ignore data and model files
+data/
+models/
+
+# Ignore system files
+.DS_Store
+Thumbs.db
+
+# Ignore logs
+*.log
+
+# Ignore VSCode settings
+.vscode/
+
+# Ignore build artifacts
+build/
+dist/
+
+# Ignore Jupyter notebooks checkpoints
+.ipynb_checkpoints/

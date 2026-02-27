@@ -8,7 +8,6 @@ function UploadPage() {
   const [selectedFile, setSelectedFile] = useState(null);
   const [preview, setPreview] = useState(null);
   const [analyzing, setAnalyzing] = useState(false);
-  const [uploading, setUploading] = useState(false);
   const [prediction, setPrediction] = useState(null);
   const [error, setError] = useState('');
   

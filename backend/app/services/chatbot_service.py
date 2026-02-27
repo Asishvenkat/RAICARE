@@ -5,8 +5,8 @@ from google import genai
 from app.config import settings
 from app.models import SeverityLevel
 
-# Initialize Gemini client
-client = genai.Client(api_key=settings.GEMINI_API_KEY)
+# Initialize Gemini client if configured
+client = genai.Client(api_key=settings.GEMINI_API_KEY) if settings.GEMINI_API_KEY else None
 
 
 def get_system_prompt(severity_level: SeverityLevel, result_percentage: float) -> str:
@@ -150,6 +150,11 @@ async def get_chatbot_response(
         AI-generated response
     """
     try:
+        if client is None:
+            return (
+                "Gemini is not configured. Set GEMINI_API_KEY in the backend .env "
+                "to enable chatbot responses."
+            )
         # Build conversation with system context
         system_prompt = get_system_prompt(severity_level, result_percentage)
         

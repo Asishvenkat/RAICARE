@@ -6,12 +6,26 @@ import cloudinary.uploader
 from fastapi import UploadFile
 from app.config import settings
 
-# Configure Cloudinary
-cloudinary.config(
-    cloud_name=settings.CLOUDINARY_CLOUD_NAME,
-    api_key=settings.CLOUDINARY_API_KEY,
-    api_secret=settings.CLOUDINARY_API_SECRET
-)
+
+def _ensure_cloudinary_config() -> None:
+    """Ensure Cloudinary is configured before attempting upload."""
+    if not all(
+        [
+            settings.CLOUDINARY_CLOUD_NAME,
+            settings.CLOUDINARY_API_KEY,
+            settings.CLOUDINARY_API_SECRET,
+        ]
+    ):
+        raise Exception(
+            "Cloudinary is not configured. Set CLOUDINARY_CLOUD_NAME, "
+            "CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET in the backend .env"
+        )
+
+    cloudinary.config(
+        cloud_name=settings.CLOUDINARY_CLOUD_NAME,
+        api_key=settings.CLOUDINARY_API_KEY,
+        api_secret=settings.CLOUDINARY_API_SECRET,
+    )
 
 
 async def upload_image_to_cloudinary(file: UploadFile) -> str:
@@ -25,6 +39,7 @@ async def upload_image_to_cloudinary(file: UploadFile) -> str:
         str: Public URL of uploaded image
     """
     try:
+        _ensure_cloudinary_config()
         # Read file content
         contents = await file.read()
         
