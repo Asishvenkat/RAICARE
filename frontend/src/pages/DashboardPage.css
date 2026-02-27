@@ -1,0 +1,260 @@
+.dashboard-page {
+  min-height: 100vh;
+  background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+  padding: 80px 20px 40px;
+}
+
+.dashboard-container {
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.dashboard-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 40px;
+}
+
+.dashboard-header h1 {
+  color: #333;
+  font-size: 2.5rem;
+  margin-bottom: 5px;
+}
+
+.dashboard-header p {
+  color: #666;
+  font-size: 1.1rem;
+}
+
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 25px;
+}
+
+.card {
+  background: white;
+  border-radius: 20px;
+  padding: 30px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+  transition: transform 0.3s ease, box-shadow 0.3s ease;
+}
+
+.card:hover {
+  transform: translateY(-5px);
+  box-shadow: 0 15px 40px rgba(0, 0, 0, 0.15);
+}
+
+.card h2 {
+  color: #333;
+  margin-bottom: 20px;
+  font-size: 1.4rem;
+}
+
+.latest-result {
+  grid-column: span 2;
+}
+
+.result-display {
+  display: flex;
+  align-items: center;
+  gap: 40px;
+}
+
+.percentage-circle {
+  width: 150px;
+  height: 150px;
+  border-radius: 50%;
+  border: 8px solid;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.percentage {
+  font-size: 2.5rem;
+  font-weight: bold;
+  color: #333;
+}
+
+.label {
+  font-size: 0.9rem;
+  color: #666;
+  margin-top: 5px;
+}
+
+.result-info {
+  flex: 1;
+}
+
+.severity-badge {
+  display: inline-block;
+  color: white;
+  padding: 10px 20px;
+  border-radius: 50px;
+  font-weight: bold;
+  margin-bottom: 15px;
+}
+
+.result-date {
+  color: #666;
+  font-size: 0.95rem;
+}
+
+.recommendations {
+  grid-column: span 1;
+}
+
+.recommendation-list {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 20px 0;
+}
+
+.recommendation-list li {
+  padding: 12px 0;
+  border-bottom: 1px solid #f0f0f0;
+  color: #555;
+  font-size: 0.95rem;
+}
+
+.recommendation-list li:last-child {
+  border-bottom: none;
+}
+
+.quick-actions {
+  grid-column: span 1;
+}
+
+.actions-grid {
+  display: grid;
+  gap: 15px;
+}
+
+.action-btn {
+  background: linear-gradient(135deg, #f8f9ff 0%, #fff 100%);
+  border: 2px solid #e0e7ff;
+  padding: 20px;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  gap: 15px;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  font-size: 1rem;
+  color: #333;
+}
+
+.action-btn:hover {
+  border-color: #667eea;
+  background: #f8f9ff;
+  transform: translateX(5px);
+}
+
+.action-icon {
+  font-size: 1.8rem;
+}
+
+.health-tips {
+  grid-column: span 2;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+}
+
+.health-tips h2 {
+  color: white;
+}
+
+.tip-content {
+  display: flex;
+  gap: 20px;
+  align-items: start;
+}
+
+.tip-icon {
+  font-size: 3rem;
+  flex-shrink: 0;
+}
+
+.tip-content p {
+  line-height: 1.6;
+  font-size: 1rem;
+}
+
+.tip-content strong {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 1.1rem;
+}
+
+.no-data {
+  grid-column: span 3;
+}
+
+.no-data-content {
+  text-align: center;
+  padding: 40px;
+}
+
+.no-data-icon {
+  font-size: 5rem;
+  margin-bottom: 20px;
+}
+
+.no-data-content h2 {
+  color: #333;
+  margin-bottom: 10px;
+}
+
+.no-data-content p {
+  color: #666;
+  margin-bottom: 25px;
+  font-size: 1.05rem;
+}
+
+.btn-primary {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  border: none;
+  padding: 14px 30px;
+  border-radius: 10px;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.3s ease;
+}
+
+.btn-primary:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
+}
+
+@media (max-width: 1024px) {
+  .latest-result,
+  .health-tips,
+  .no-data {
+    grid-column: span 1;
+  }
+
+  .result-display {
+    flex-direction: column;
+    text-align: center;
+  }
+}
+
+@media (max-width: 768px) {
+  .dashboard-header h1 {
+    font-size: 2rem;
+  }
+
+  .dashboard-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .card {
+    padding: 20px;
+  }
+}
