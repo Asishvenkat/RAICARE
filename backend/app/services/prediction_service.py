@@ -1,105 +1,184 @@
-"""
-Prediction Service - RA Detection Model Inference (ResNet50)
-"""
+"""Prediction Service - 3-model ensemble RA detection inference."""
+
+import json
+from pathlib import Path
+from typing import Any, Dict
+
 import torch
 import torch.nn as nn
-from torchvision import transforms, models
-from pathlib import Path
 from PIL import Image
-import numpy as np
-from typing import Dict, Any
+from torchvision import models, transforms
+
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-IMG_SIZE = 224
 MODELS_DIR = Path(__file__).parent.parent.parent.parent / "models"
+ENSEMBLE_RESULTS_PATH = MODELS_DIR / "three_model_ensemble_results.json"
 
 
-class OptimizedModel(nn.Module):
-    """Optimized ResNet50 model for RA detection"""
-
-    def __init__(self, num_classes=2):
-        super(OptimizedModel, self).__init__()
-
-        # Use ResNet50 - same as training
-        self.resnet = models.resnet50(pretrained=True)
-
-        # Replace classifier
+class ResNet50RA(nn.Module):
+    def __init__(self, num_classes: int = 2):
+        super().__init__()
+        self.resnet = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V1)
         self.resnet.fc = nn.Sequential(
             nn.Dropout(0.5),
-            nn.Linear(2048, num_classes)
+            nn.Linear(2048, num_classes),
         )
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.resnet(x)
+
+
+class DenseNet121RA(nn.Module):
+    def __init__(self, num_classes: int = 2):
+        super().__init__()
+        self.backbone = models.densenet121(weights=models.DenseNet121_Weights.IMAGENET1K_V1)
+        in_features = self.backbone.classifier.in_features
+        self.backbone.classifier = nn.Sequential(
+            nn.Dropout(p=0.35),
+            nn.Linear(in_features, 256),
+            nn.ReLU(inplace=True),
+            nn.Dropout(p=0.2),
+            nn.Linear(256, num_classes),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.backbone(x)
+
+
+class EfficientNetB0RA(nn.Module):
+    def __init__(self, num_classes: int = 2):
+        super().__init__()
+        self.backbone = models.efficientnet_b0(weights=models.EfficientNet_B0_Weights.IMAGENET1K_V1)
+        in_features = self.backbone.classifier[1].in_features
+        self.backbone.classifier = nn.Sequential(
+            nn.Dropout(p=0.25),
+            nn.Linear(in_features, num_classes),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.backbone(x)
 
 
 class PredictionService:
     def __init__(self):
-        # Primary model (used for predictions)
-        self.resnet_model = None
+        self.resnet_model: nn.Module | None = None
+        self.densenet_model: nn.Module | None = None
+        self.efficientnet_model: nn.Module | None = None
+
+        # Default equal weights; overridden if tuned ensemble results exist.
+        self.weights = {
+            "resnet50": 1.0 / 3.0,
+            "densenet121": 1.0 / 3.0,
+            "efficientnet_b0": 1.0 / 3.0,
+        }
+
+        self.tf_224 = transforms.Compose(
+            [
+                transforms.Resize((224, 224)),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ]
+        )
+        self.tf_160 = transforms.Compose(
+            [
+                transforms.Resize((160, 160)),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ]
+        )
 
         self._load_models()
+        self._load_ensemble_weights()
 
-    def _load_models(self):
-        """Load ResNet50 model used for predictions"""
+    def _load_checkpoint_into_model(self, model: nn.Module, model_path: Path, model_name: str) -> nn.Module | None:
+        if not model_path.exists():
+            print(f"[WARN] {model_name} checkpoint not found: {model_path}")
+            return None
 
-        # Load ResNet50
-        resnet_path = MODELS_DIR / "ensemble_model_best.pth"
-        if resnet_path.exists():
-            self.resnet_model = OptimizedModel(num_classes=2).to(DEVICE)
-            checkpoint = torch.load(resnet_path, map_location=DEVICE)
-            self.resnet_model.load_state_dict(checkpoint['model_state'])
-            self.resnet_model.eval()
-            print("[OK] ResNet50 model loaded successfully")
-        else:
-            print(f"[ERROR] ResNet50 model not found at {resnet_path}")
-            self.resnet_model = None
+        checkpoint = torch.load(model_path, map_location=DEVICE)
+        model.load_state_dict(checkpoint["model_state"])
+        model.to(DEVICE)
+        model.eval()
+        print(f"[OK] {model_name} loaded")
+        return model
+
+    def _load_models(self) -> None:
+        self.resnet_model = self._load_checkpoint_into_model(
+            ResNet50RA(num_classes=2),
+            MODELS_DIR / "ensemble_model_best.pth",
+            "ResNet50",
+        )
+        self.densenet_model = self._load_checkpoint_into_model(
+            DenseNet121RA(num_classes=2),
+            MODELS_DIR / "densenet121_hands_best.pth",
+            "DenseNet121",
+        )
+        self.efficientnet_model = self._load_checkpoint_into_model(
+            EfficientNetB0RA(num_classes=2),
+            MODELS_DIR / "fast_hands_best.pth",
+            "EfficientNet-B0",
+        )
+
+    def _load_ensemble_weights(self) -> None:
+        if not ENSEMBLE_RESULTS_PATH.exists():
+            print("[INFO] No tuned ensemble weights found; using equal weights")
+            return
+
+        try:
+            with open(ENSEMBLE_RESULTS_PATH, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            weights = payload.get("ensemble", {}).get("weights", {})
+            if set(weights.keys()) == {"resnet50", "densenet121", "efficientnet_b0"}:
+                self.weights = {
+                    "resnet50": float(weights["resnet50"]),
+                    "densenet121": float(weights["densenet121"]),
+                    "efficientnet_b0": float(weights["efficientnet_b0"]),
+                }
+                print(f"[OK] Loaded tuned ensemble weights: {self.weights}")
+        except Exception as exc:
+            print(f"[WARN] Failed to parse ensemble weights, using defaults: {exc}")
+
+    def _predict_positive_prob(self, model: nn.Module, image_tensor: torch.Tensor) -> float:
+        with torch.no_grad():
+            logits = model(image_tensor)
+            prob_pos = torch.softmax(logits, dim=1)[0, 1].item()
+        return prob_pos
 
     def predict_image(self, image_file) -> Dict[str, Any]:
-        """
-        Make prediction on an uploaded image file using primary ResNet50 model
-
-        Args:
-            image_file: FastAPI UploadFile object
-
-        Returns:
-            Dict with prediction results from ResNet50 (primary model)
-        """
-        if self.resnet_model is None:
-            raise Exception("ResNet50 Model not loaded")
-
-        # Load and preprocess image
         image = Image.open(image_file.file).convert("RGB")
-        transform = transforms.Compose([
-            transforms.Resize((IMG_SIZE, IMG_SIZE)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                               std=[0.229, 0.224, 0.225])
-        ])
 
-        image_tensor = transform(image).unsqueeze(0).to(DEVICE)
+        available_models = []
 
-        with torch.no_grad():
-            # Primary Model: ResNet50 (used for final prediction)
-            outputs = self.resnet_model(image_tensor)
+        if self.resnet_model is not None:
+            x224 = self.tf_224(image).unsqueeze(0).to(DEVICE)
+            p_res = self._predict_positive_prob(self.resnet_model, x224)
+            available_models.append(("resnet50", p_res))
 
-            # Get probabilities
-            probs = torch.softmax(outputs, dim=1)
+        if self.densenet_model is not None:
+            x224 = self.tf_224(image).unsqueeze(0).to(DEVICE)
+            p_den = self._predict_positive_prob(self.densenet_model, x224)
+            available_models.append(("densenet121", p_den))
 
-            # Get prediction (1 = RA Positive, 0 = RA Negative)
-            pred = torch.argmax(outputs, dim=1).item()
-            confidence_positive = probs[0, 1].item() * 100  # Confidence for positive class
-            confidence_negative = probs[0, 0].item() * 100  # Confidence for negative class
-            
-            print(f"DEBUG MODEL OUTPUT - ResNet50 outputs: {outputs}")
-            print(f"DEBUG MODEL OUTPUT - Probs: {probs}")
-            print(f"DEBUG MODEL OUTPUT - pred={pred}, conf_pos={confidence_positive:.2f}, conf_neg={confidence_negative:.2f}")
-            
-        # Determine severity based on ResNet50 prediction (primary model)
-        if pred == 0:  # Negative (No RA)
+        if self.efficientnet_model is not None:
+            x160 = self.tf_160(image).unsqueeze(0).to(DEVICE)
+            p_eff = self._predict_positive_prob(self.efficientnet_model, x160)
+            available_models.append(("efficientnet_b0", p_eff))
+
+        if not available_models:
+            raise Exception("No prediction model is loaded")
+
+        # Normalize active weights only across currently loaded models.
+        active_weight_sum = sum(self.weights[name] for name, _ in available_models)
+        ensemble_positive = sum((self.weights[name] / active_weight_sum) * prob for name, prob in available_models)
+
+        pred = 1 if ensemble_positive >= 0.5 else 0
+        confidence_positive = ensemble_positive * 100.0
+        confidence_negative = (1.0 - ensemble_positive) * 100.0
+
+        if pred == 0:
             severity_level = "none"
-            result_percentage = 0.0  # No RA detected = 0% RA score
-        else:  # Positive (RA Detected)
+            result_percentage = 0.0
+        else:
             result_percentage = float(confidence_positive)
             if confidence_positive < 60:
                 severity_level = "mild"
@@ -108,14 +187,23 @@ class PredictionService:
             else:
                 severity_level = "severe"
 
-        print(f"DEBUG - Prediction: pred={pred}, confidence_pos={confidence_positive:.2f}, confidence_neg={confidence_negative:.2f}, result_pct={result_percentage:.2f}")
+        per_model_probs = {name: round(prob * 100.0, 2) for name, prob in available_models}
+        print(
+            "[DEBUG] Ensemble probs(%): "
+            f"{per_model_probs} | combined={confidence_positive:.2f}%"
+        )
 
         return {
             "prediction": "Positive (RA Detected)" if pred == 1 else "Negative (No RA)",
             "result_percentage": float(round(result_percentage, 2)),
             "severity_level": severity_level,
             "confidence": float(round(max(confidence_positive, confidence_negative), 2)),
-            "is_positive": pred == 1
+            "is_positive": pred == 1,
+            "ensemble": {
+                "weights": self.weights,
+                "model_positive_probabilities": per_model_probs,
+                "combined_positive_probability": float(round(confidence_positive, 2)),
+            },
         }
 
 
