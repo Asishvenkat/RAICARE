@@ -93,18 +93,26 @@ class DenseNet121RA(nn.Module):
         return self.backbone(x)
 
 
-class EfficientNetB0RA(nn.Module):
-    def __init__(self):
+
+# VGG19 model for ensemble
+class VGG19HandsClassifier(nn.Module):
+    """VGG19 features + lightweight classifier head for faster fine-tuning."""
+    def __init__(self, num_classes: int = 2):
         super().__init__()
-        self.backbone = models.efficientnet_b0(weights=models.EfficientNet_B0_Weights.IMAGENET1K_V1)
-        in_features = self.backbone.classifier[1].in_features
-        self.backbone.classifier = nn.Sequential(
-            nn.Dropout(p=0.25),
-            nn.Linear(in_features, 2),
+        weights = models.VGG19_Weights.IMAGENET1K_V1
+        vgg = models.vgg19(weights=weights)
+        self.features = vgg.features
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Dropout(p=0.3),
+            nn.Linear(512, num_classes),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.backbone(x)
+        x = self.features(x)
+        x = self.avgpool(x)
+        return self.classifier(x)
 
 
 @dataclass
@@ -172,57 +180,55 @@ def main() -> None:
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ]
     )
-    tf_160 = transforms.Compose(
-        [
-            transforms.Resize((160, 160)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        ]
-    )
+
 
     resnet = load_checkpoint(ResNet50RA(), "ensemble_model_best.pth")
     densenet = load_checkpoint(DenseNet121RA(), "densenet121_hands_best.pth")
-    efficientnet = load_checkpoint(EfficientNetB0RA(), "fast_hands_best.pth")
+    vgg19 = load_checkpoint(VGG19HandsClassifier(), "vgg19_hands_best.pth")
+
 
     probs_resnet: list[float] = []
     probs_densenet: list[float] = []
-    probs_efficientnet: list[float] = []
+    probs_vgg19: list[float] = []
+
 
     with torch.no_grad():
         for idx, img_path in enumerate(dataset.image_paths, start=1):
             image = Image.open(img_path).convert("RGB")
 
             x224 = tf_224(image).unsqueeze(0).to(DEVICE)
-            x160 = tf_160(image).unsqueeze(0).to(DEVICE)
 
             p_res = torch.softmax(resnet(x224), dim=1)[0, 1].item()
             p_den = torch.softmax(densenet(x224), dim=1)[0, 1].item()
-            p_eff = torch.softmax(efficientnet(x160), dim=1)[0, 1].item()
+            p_vgg = torch.softmax(vgg19(x224), dim=1)[0, 1].item()
 
             probs_resnet.append(p_res)
             probs_densenet.append(p_den)
-            probs_efficientnet.append(p_eff)
+            probs_vgg19.append(p_vgg)
 
             if idx % 100 == 0:
                 print(f"Processed {idx}/{len(dataset.image_paths)} images")
 
+
     p_res = np.array(probs_resnet, dtype=np.float64)
     p_den = np.array(probs_densenet, dtype=np.float64)
-    p_eff = np.array(probs_efficientnet, dtype=np.float64)
+    p_vgg = np.array(probs_vgg19, dtype=np.float64)
 
     # Individual model metrics
     pred_res = (p_res >= 0.5).astype(np.int64)
     pred_den = (p_den >= 0.5).astype(np.int64)
-    pred_eff = (p_eff >= 0.5).astype(np.int64)
+    pred_vgg = (p_vgg >= 0.5).astype(np.int64)
 
     metrics_res = evaluate_predictions(y_true, pred_res)
     metrics_den = evaluate_predictions(y_true, pred_den)
-    metrics_eff = evaluate_predictions(y_true, pred_eff)
+    metrics_vgg = evaluate_predictions(y_true, pred_vgg)
+
 
     print("\nIndividual model accuracy:")
     print(f"- ResNet50:     {metrics_res.acc:.2f}%")
     print(f"- DenseNet121:  {metrics_den.acc:.2f}%")
-    print(f"- EfficientNet: {metrics_eff.acc:.2f}%")
+    print(f"- VGG19:        {metrics_vgg.acc:.2f}%")
+
 
     # Weight search to maximize validation accuracy.
     best_acc = -1.0
@@ -236,7 +242,7 @@ def main() -> None:
             w3 = 1.0 - w1 - w2
             if w3 < 0.0:
                 continue
-            p_ens = w1 * p_res + w2 * p_den + w3 * p_eff
+            p_ens = w1 * p_res + w2 * p_den + w3 * p_vgg
             pred = (p_ens >= 0.5).astype(np.int64)
             acc = 100.0 * np.mean(pred == y_true)
             if acc > best_acc:
@@ -244,11 +250,12 @@ def main() -> None:
                 best_w = (float(w1), float(w2), float(w3))
                 best_pred = pred
 
+
     metrics_ens = evaluate_predictions(y_true, best_pred)
 
     print("\nBest weighted ensemble:")
     print(
-        "- weights (ResNet, DenseNet, EfficientNet): "
+        "- weights (ResNet, DenseNet, VGG19): "
         f"({best_w[0]:.2f}, {best_w[1]:.2f}, {best_w[2]:.2f})"
     )
     print(f"- Accuracy:  {metrics_ens.acc:.2f}%")
@@ -260,19 +267,20 @@ def main() -> None:
         f"FP={metrics_ens.fp}, FN={metrics_ens.fn}"
     )
 
+
     payload = {
         "device": str(DEVICE),
         "validation_samples": int(len(y_true)),
         "individual": {
             "resnet50": metrics_res.__dict__,
             "densenet121": metrics_den.__dict__,
-            "efficientnet_b0": metrics_eff.__dict__,
+            "vgg19": metrics_vgg.__dict__,
         },
         "ensemble": {
             "weights": {
                 "resnet50": best_w[0],
                 "densenet121": best_w[1],
-                "efficientnet_b0": best_w[2],
+                "vgg19": best_w[2],
             },
             "metrics": metrics_ens.__dict__,
         },

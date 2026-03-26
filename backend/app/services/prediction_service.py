@@ -45,31 +45,40 @@ class DenseNet121RA(nn.Module):
         return self.backbone(x)
 
 
-class EfficientNetB0RA(nn.Module):
+
+# VGG19 model for ensemble
+class VGG19HandsClassifier(nn.Module):
+    """VGG19 features + lightweight classifier head for faster fine-tuning."""
     def __init__(self, num_classes: int = 2):
         super().__init__()
-        self.backbone = models.efficientnet_b0(weights=models.EfficientNet_B0_Weights.IMAGENET1K_V1)
-        in_features = self.backbone.classifier[1].in_features
-        self.backbone.classifier = nn.Sequential(
-            nn.Dropout(p=0.25),
-            nn.Linear(in_features, num_classes),
+        weights = models.VGG19_Weights.IMAGENET1K_V1
+        vgg = models.vgg19(weights=weights)
+        self.features = vgg.features
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Dropout(p=0.3),
+            nn.Linear(512, num_classes),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.backbone(x)
+        x = self.features(x)
+        x = self.avgpool(x)
+        return self.classifier(x)
+
 
 
 class PredictionService:
     def __init__(self):
         self.resnet_model: nn.Module | None = None
         self.densenet_model: nn.Module | None = None
-        self.efficientnet_model: nn.Module | None = None
+        self.vgg19_model: nn.Module | None = None
 
         # Default equal weights; overridden if tuned ensemble results exist.
         self.weights = {
             "resnet50": 1.0 / 3.0,
             "densenet121": 1.0 / 3.0,
-            "efficientnet_b0": 1.0 / 3.0,
+            "vgg19": 1.0 / 3.0,
         }
 
         self.tf_224 = transforms.Compose(
@@ -79,13 +88,7 @@ class PredictionService:
                 transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
             ]
         )
-        self.tf_160 = transforms.Compose(
-            [
-                transforms.Resize((160, 160)),
-                transforms.ToTensor(),
-                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-            ]
-        )
+
 
         self._load_models()
         self._load_ensemble_weights()
@@ -113,10 +116,10 @@ class PredictionService:
             MODELS_DIR / "densenet121_hands_best.pth",
             "DenseNet121",
         )
-        self.efficientnet_model = self._load_checkpoint_into_model(
-            EfficientNetB0RA(num_classes=2),
-            MODELS_DIR / "fast_hands_best.pth",
-            "EfficientNet-B0",
+        self.vgg19_model = self._load_checkpoint_into_model(
+            VGG19HandsClassifier(num_classes=2),
+            MODELS_DIR / "vgg19_hands_best.pth",
+            "VGG19",
         )
 
     def _load_ensemble_weights(self) -> None:
@@ -128,11 +131,11 @@ class PredictionService:
             with open(ENSEMBLE_RESULTS_PATH, "r", encoding="utf-8") as f:
                 payload = json.load(f)
             weights = payload.get("ensemble", {}).get("weights", {})
-            if set(weights.keys()) == {"resnet50", "densenet121", "efficientnet_b0"}:
+            if set(weights.keys()) == {"resnet50", "densenet121", "vgg19"}:
                 self.weights = {
                     "resnet50": float(weights["resnet50"]),
                     "densenet121": float(weights["densenet121"]),
-                    "efficientnet_b0": float(weights["efficientnet_b0"]),
+                    "vgg19": float(weights["vgg19"]),
                 }
                 print(f"[OK] Loaded tuned ensemble weights: {self.weights}")
         except Exception as exc:
@@ -159,10 +162,11 @@ class PredictionService:
             p_den = self._predict_positive_prob(self.densenet_model, x224)
             available_models.append(("densenet121", p_den))
 
-        if self.efficientnet_model is not None:
-            x160 = self.tf_160(image).unsqueeze(0).to(DEVICE)
-            p_eff = self._predict_positive_prob(self.efficientnet_model, x160)
-            available_models.append(("efficientnet_b0", p_eff))
+
+        if self.vgg19_model is not None:
+            x224 = self.tf_224(image).unsqueeze(0).to(DEVICE)
+            p_vgg = self._predict_positive_prob(self.vgg19_model, x224)
+            available_models.append(("vgg19", p_vgg))
 
         if not available_models:
             raise Exception("No prediction model is loaded")
