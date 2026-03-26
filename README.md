@@ -39,19 +39,21 @@ A full-stack web application for detecting Rheumatoid Arthritis from X-ray image
 - Progressive unfreezing: `layer3` unfrozen after epoch 5
 
 ### Training Configuration
-- Script: `train_ensemble_model.py`
+- Script (VGG19 hands): `train_vgg19_hands.py`
 - Framework: PyTorch
-- Loss: CrossEntropyLoss
-- Optimizer: Adam (lr=0.001)
+- Loss: CrossEntropyLoss with label smoothing
+- Optimizer: AdamW
 - Scheduler: CosineAnnealingLR
-- Epochs: 8
-- Batch size: 8
+- Default epochs: 24
+- Default batch size: 64
 - Device: CUDA if available, otherwise CPU
+- Auto-resume: continues from latest `models/vgg19_hands_epoch*.pth` checkpoint
 
 ### Outputs and Artifacts
-- Best checkpoint: `models/ensemble_model_best.pth`
-- Final checkpoint: `models/ensemble_model_final.pth`
-- Training history: `models/training_history.json`
+- Best checkpoint: `models/vgg19_hands_best.pth`
+- Final checkpoint: `models/vgg19_hands_final.pth`
+- Epoch checkpoints: `models/vgg19_hands_epoch*.pth`
+- Training history: `models/vgg19_hands_history.json`
 
 ### Metrics and Visualization
 - Generate training curves:
@@ -100,8 +102,10 @@ If you just want to run predictions without training:
 If you need to retrain the model:
 
 1. Get MURA dataset manually from Stanford ML Group
-2. Run training: `python train_ensemble_model.py`
-3. Models will be saved to `models/` directory
+2. Run VGG19 hands training: `python train_vgg19_hands.py`
+3. Optional (override defaults): `python train_vgg19_hands.py --epochs 30 --batch-size 64 --img-size 160`
+4. Resume is automatic after interruption. To force fresh training: `python train_vgg19_hands.py --no-resume`
+5. Models will be saved to `models/` directory
 
 ### Backend Setup
 1. Navigate to the backend directory:
