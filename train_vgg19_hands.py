@@ -24,7 +24,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from PIL import Image
-from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
+from torch.utils.data import DataLoader, Dataset
 from torchvision import models, transforms
 
 
@@ -32,18 +32,21 @@ from torchvision import models, transforms
 # Default configuration
 # ---------------------------
 SEED = 42
-DEFAULT_IMG_SIZE = 160
-DEFAULT_EPOCHS = 24
-DEFAULT_BATCH_SIZE = 64
-NUM_WORKERS = 0  # Windows-friendly default
+DEFAULT_IMG_SIZE = 128
+DEFAULT_EPOCHS = 12
+DEFAULT_BATCH_SIZE = 48
+NUM_WORKERS = 2
 EARLY_STOPPING_PATIENCE = 5
+MIN_EPOCHS_BEFORE_EARLY_STOP = 12
 UNFREEZE_AT_EPOCH = 3
 TARGET_VALID_ACC = 95.0
+DEFAULT_MAX_TRAIN_HOURS = 1.9
+LOG_INTERVAL = 25
 
 LEARNING_RATE_HEAD = 1e-3
 LEARNING_RATE_BACKBONE = 1e-4
 WEIGHT_DECAY = 1e-4
-LABEL_SMOOTHING = 0.03
+LABEL_SMOOTHING = 0.01
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 BASE_DIR = Path(__file__).parent
@@ -137,15 +140,20 @@ def unfreeze_backbone(model: VGG19HandsClassifier) -> None:
         param.requires_grad = True
 
 
-def build_weighted_sampler(labels: list[int]) -> WeightedRandomSampler:
-    class_counts = np.bincount(labels)
-    class_weights = 1.0 / np.clip(class_counts, a_min=1, a_max=None)
-    sample_weights = [class_weights[y] for y in labels]
-    return WeightedRandomSampler(
-        weights=torch.as_tensor(sample_weights, dtype=torch.double),
-        num_samples=len(sample_weights),
-        replacement=True,
-    )
+def unfreeze_last_block(model: VGG19HandsClassifier) -> None:
+    # VGG19 block5 starts near index 28 in torchvision's features sequence.
+    for param in model.features.parameters():
+        param.requires_grad = False
+    for layer in model.features[28:]:
+        for param in layer.parameters():
+            param.requires_grad = True
+
+
+def build_class_weights(labels: list[int]) -> torch.Tensor:
+    class_counts = np.bincount(labels, minlength=2)
+    total = class_counts.sum()
+    weights = total / (2.0 * np.clip(class_counts, a_min=1, a_max=None))
+    return torch.tensor(weights, dtype=torch.float32, device=DEVICE)
 
 
 def latest_epoch_checkpoint() -> tuple[Path | None, int]:
@@ -179,13 +187,16 @@ def train_one_epoch(
     criterion: nn.Module,
     optimizer: optim.Optimizer,
     scaler: torch.amp.GradScaler,
+    log_interval: int,
 ) -> EpochStats:
     model.train()
     running_loss = 0.0
     running_correct = 0
     running_total = 0
 
-    for images, labels in loader:
+
+    total_batches = len(loader)
+    for batch_idx, (images, labels) in enumerate(loader, start=1):
         images = images.to(DEVICE, non_blocking=True)
         labels = labels.to(DEVICE, non_blocking=True)
 
@@ -203,6 +214,9 @@ def train_one_epoch(
         running_loss += loss.item() * labels.size(0)
         running_correct += (preds == labels).sum().item()
         running_total += labels.size(0)
+
+        if log_interval > 0 and (batch_idx % log_interval == 0 or batch_idx == total_batches):
+            print(f"    Batch {batch_idx}/{total_batches}")
 
     return EpochStats(
         loss=running_loss / running_total,
@@ -266,9 +280,49 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE, help="Batch size")
     parser.add_argument("--img-size", type=int, default=DEFAULT_IMG_SIZE, help="Image size")
     parser.add_argument(
+        "--max-train-hours",
+        type=float,
+        default=DEFAULT_MAX_TRAIN_HOURS,
+        help="Stop training after this many hours (checkpoint is still saved)",
+    )
+    parser.add_argument(
+        "--full-finetune",
+        action="store_true",
+        help="Unfreeze VGG19 backbone for full fine-tuning (slower, mainly for GPU)",
+    )
+    parser.add_argument(
+        "--unfreeze-epoch",
+        type=int,
+        default=UNFREEZE_AT_EPOCH,
+        help="Epoch to start backbone fine-tuning (0 disables)",
+    )
+    parser.add_argument(
+        "--unfreeze-mode",
+        choices=["none", "last-block", "full"],
+        default="last-block",
+        help="How much of the backbone to unfreeze for fine-tuning",
+    )
+    parser.add_argument(
         "--no-resume",
         action="store_true",
         help="Disable auto-resume from latest checkpoint",
+    )
+    parser.add_argument(
+        "--reset-checkpoints",
+        action="store_true",
+        help="Delete existing VGG19 checkpoints/history before training",
+    )
+    parser.add_argument(
+        "--early-stopping-patience",
+        type=int,
+        default=EARLY_STOPPING_PATIENCE,
+        help="Stop after this many non-improving epochs (set <=0 to disable)",
+    )
+    parser.add_argument(
+        "--min-epochs-before-early-stop",
+        type=int,
+        default=MIN_EPOCHS_BEFORE_EARLY_STOP,
+        help="Do not apply early stopping before this epoch",
     )
     return parser.parse_args()
 
@@ -278,8 +332,22 @@ def main() -> None:
     epochs = args.epochs
     batch_size = args.batch_size
     img_size = args.img_size
+    unfreeze_epoch = max(0, args.unfreeze_epoch)
+    unfreeze_mode = "full" if args.full_finetune else args.unfreeze_mode
+    max_train_hours = max(0.0, args.max_train_hours)
+    max_train_seconds = max_train_hours * 3600.0
+    early_stopping_patience = args.early_stopping_patience
+    min_epochs_before_early_stop = max(1, args.min_epochs_before_early_stop)
 
     set_seed(SEED)
+
+    if args.reset_checkpoints:
+        for p in MODELS_DIR.glob("vgg19_hands_epoch*.pth"):
+            p.unlink(missing_ok=True)
+        BEST_MODEL_PATH.unlink(missing_ok=True)
+        FINAL_MODEL_PATH.unlink(missing_ok=True)
+        HISTORY_PATH.unlink(missing_ok=True)
+        print("Removed previous VGG19 checkpoints and history.")
 
     if DEVICE.type == "cuda":
         torch.backends.cudnn.benchmark = True
@@ -291,20 +359,33 @@ def main() -> None:
     print(f"Train CSV: {TRAIN_CSV}")
     print(f"Valid CSV: {VALID_CSV}")
     print(f"Config: epochs={epochs}, batch_size={batch_size}, img_size={img_size}")
+    print(f"Fine-tune: mode={unfreeze_mode}, unfreeze_epoch={unfreeze_epoch}")
+    if early_stopping_patience > 0:
+        print(
+            "Early stopping: "
+            f"patience={early_stopping_patience}, "
+            f"min_epoch={min_epochs_before_early_stop}"
+        )
+    else:
+        print("Early stopping: disabled")
+    if max_train_hours > 0:
+        print(f"Max train time: {max_train_hours:.2f} hours")
 
     train_transform = transforms.Compose(
         [
-            transforms.Resize((img_size, img_size)),
+            transforms.Resize((img_size + 20, img_size + 20)),
+            transforms.RandomCrop((img_size, img_size)),
             transforms.RandomHorizontalFlip(p=0.5),
-            transforms.RandomRotation(10),
-            transforms.RandomAffine(degrees=0, translate=(0.04, 0.04), scale=(0.97, 1.03)),
+            transforms.RandomRotation(8),
+            transforms.ColorJitter(brightness=0.12, contrast=0.12),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ]
     )
     valid_transform = transforms.Compose(
         [
-            transforms.Resize((img_size, img_size)),
+            transforms.Resize((img_size + 20, img_size + 20)),
+            transforms.CenterCrop((img_size, img_size)),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ]
@@ -318,19 +399,23 @@ def main() -> None:
     print(f"Train images: {len(train_dataset)} (negative={train_neg}, positive={train_pos})")
     print(f"Valid images: {len(valid_dataset)}")
 
+    num_workers = 0 if DEVICE.type == "cpu" else NUM_WORKERS
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
-        sampler=build_weighted_sampler(train_dataset.labels),
-        num_workers=NUM_WORKERS,
+        shuffle=True,
+        num_workers=num_workers,
         pin_memory=(DEVICE.type == "cuda"),
+        persistent_workers=(num_workers > 0),
     )
     valid_loader = DataLoader(
         valid_dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=NUM_WORKERS,
+        num_workers=num_workers,
         pin_memory=(DEVICE.type == "cuda"),
+        persistent_workers=(num_workers > 0),
     )
 
     model = VGG19HandsClassifier(num_classes=2).to(DEVICE)
@@ -338,7 +423,8 @@ def main() -> None:
         model = model.to(memory_format=torch.channels_last)
     freeze_backbone(model)
 
-    criterion = nn.CrossEntropyLoss(label_smoothing=LABEL_SMOOTHING)
+    class_weights = build_class_weights(train_dataset.labels)
+    criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=LABEL_SMOOTHING)
     head_params = list(model.classifier.parameters())
     backbone_params = list(model.features.parameters())
 
@@ -380,8 +466,11 @@ def main() -> None:
             best_valid_acc = ckpt.get("best_valid_acc", 0.0)
             start_epoch = resume_epoch + 1
 
-            if resume_epoch >= UNFREEZE_AT_EPOCH:
-                unfreeze_backbone(model)
+            if unfreeze_epoch > 0 and resume_epoch >= unfreeze_epoch:
+                if unfreeze_mode == "full":
+                    unfreeze_backbone(model)
+                elif unfreeze_mode == "last-block":
+                    unfreeze_last_block(model)
 
             if HISTORY_PATH.exists():
                 with open(HISTORY_PATH, "r", encoding="utf-8") as f:
@@ -398,13 +487,30 @@ def main() -> None:
     train_start = perf_counter()
 
     for epoch in range(start_epoch, epochs + 1):
+        elapsed_before_epoch = perf_counter() - train_start
+        if max_train_seconds > 0 and elapsed_before_epoch >= max_train_seconds:
+            print("Max training time reached before next epoch. Stopping.")
+            break
+
         epoch_start = perf_counter()
+        print(f"[Epoch {epoch}/{epochs}] Starting...")
 
-        if epoch == UNFREEZE_AT_EPOCH:
-            print(f"[Epoch {epoch}] Unfreezing VGG19 feature backbone for fine-tuning")
-            unfreeze_backbone(model)
+        if unfreeze_epoch > 0 and epoch == unfreeze_epoch:
+            if unfreeze_mode == "full":
+                print(f"[Epoch {epoch}] Unfreezing full VGG19 backbone")
+                unfreeze_backbone(model)
+            elif unfreeze_mode == "last-block":
+                print(f"[Epoch {epoch}] Unfreezing VGG19 last feature block")
+                unfreeze_last_block(model)
 
-        train_stats = train_one_epoch(model, train_loader, criterion, optimizer, scaler)
+        train_stats = train_one_epoch(
+            model,
+            train_loader,
+            criterion,
+            optimizer,
+            scaler,
+            log_interval=LOG_INTERVAL,
+        )
         valid_stats = validate_one_epoch(model, valid_loader, criterion)
         scheduler.step()
 
@@ -461,8 +567,20 @@ def main() -> None:
             print(f"Target reached ({TARGET_VALID_ACC:.1f}%+). Stopping early.")
             break
 
-        if patience >= EARLY_STOPPING_PATIENCE:
-            print("Early stopping triggered.")
+        if (
+            early_stopping_patience > 0
+            and epoch >= min_epochs_before_early_stop
+            and patience >= early_stopping_patience
+        ):
+            print(
+                "Early stopping triggered "
+                f"(no improvement for {patience} epochs)."
+            )
+            break
+
+        elapsed_after_epoch = perf_counter() - train_start
+        if max_train_seconds > 0 and elapsed_after_epoch >= max_train_seconds:
+            print("Max training time reached. Stopping and saving progress.")
             break
 
     total_minutes = (perf_counter() - train_start) / 60.0

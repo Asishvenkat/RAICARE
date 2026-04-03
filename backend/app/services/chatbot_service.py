@@ -1,12 +1,11 @@
 """
-Gemini AI Chatbot Service - Personalized RA Recommendations
+Groq AI Chatbot Service - Personalized RA Recommendations
 """
-from google import genai
+
+import os
+import requests
 from app.config import settings
 from app.models import SeverityLevel
-
-# Initialize Gemini client if configured
-client = genai.Client(api_key=settings.GEMINI_API_KEY) if settings.GEMINI_API_KEY else None
 
 
 def get_system_prompt(severity_level: SeverityLevel, result_percentage: float) -> str:
@@ -126,11 +125,13 @@ RESPONSE GUIDELINES:
 8. If asked about foods, provide a detailed list
 9. If asked about exercises, describe specific movements
 10. If asked medical questions, provide information but emphasize consulting their doctor
+11. Always include clear precautions, warning signs, and when to seek urgent care
 
 TONE: Professional, caring, informative, and hopeful
 """
     
     return base_prompt + severity_context + instructions
+
 
 
 async def get_chatbot_response(
@@ -139,41 +140,41 @@ async def get_chatbot_response(
     result_percentage: float
 ) -> str:
     """
-    Get AI response from Gemini based on user message and RA severity
-    
-    Args:
-        user_message: User's question/message
-        severity_level: User's RA severity level
-        result_percentage: RA detection percentage
-        
-    Returns:
-        AI-generated response
+    Get AI response from Groq API based on user message and RA severity.
+    Uses GROQ_MODEL env/config; defaults to llama-3.3-70b-versatile.
     """
     try:
-        if client is None:
-            return (
-                "Gemini is not configured. Set GEMINI_API_KEY in the backend .env "
-                "to enable chatbot responses."
-            )
         # Build conversation with system context
         system_prompt = get_system_prompt(severity_level, result_percentage)
-        
-        full_prompt = f"""{system_prompt}
 
-USER QUESTION: {user_message}
+        api_key = settings.GROQ_API_KEY or os.getenv("GROQ_API_KEY", "")
+        if not api_key:
+            return "GROQ_API_KEY is not set in the environment."
 
-Provide a helpful, personalized response based on their {severity_level.value.upper()} RA condition:"""
-        
-        # Generate response using Gemini 2.0 Flash
-        response = client.models.generate_content(
-            model="gemini-2.0-flash",
-            contents=full_prompt
-        )
-        
-        return response.text
-        
+        model_name = settings.GROQ_MODEL or os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+
+        url = "https://api.groq.com/openai/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": model_name,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message}
+            ],
+            "temperature": 0.7
+        }
+        response = requests.post(url, headers=headers, json=payload, timeout=60)
+        response.raise_for_status()
+        data = response.json()
+        # Groq returns the response in choices[0].message.content
+        if "choices" in data and data["choices"] and "message" in data["choices"][0]:
+            return data["choices"][0]["message"]["content"]
+        else:
+            return str(data)
     except Exception as e:
-        # Fallback response if API fails
         return f"I apologize, but I'm having trouble processing your request right now. Please try again later. Error: {str(e)}"
 
 

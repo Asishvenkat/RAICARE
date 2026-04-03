@@ -16,6 +16,12 @@ Thumbs.db
 # Ignore logs
 *.log
 
+# Ignore environment files (keep secrets local)
+.env
+.env.*
+backend/.env
+backend/.env.*
+
 # Ignore VSCode settings
 .vscode/
 
